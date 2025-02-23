@@ -29,7 +29,7 @@ RSS_FEEDS = {
     "World": "https://feeds.feedburner.com/ndtvnews-world-news",
     "States": "https://feeds.feedburner.com/ndtvnews-south",
     "Cities": "https://feeds.feedburner.com/ndtvnews-cities-news",
-    "Entertainment": "https://example.com/entertainment-rss"
+    "Entertainment": "https://feeds.feedburner.com/ndtvmovies-latest"
 }
 @app.route('/health')
 def health():
