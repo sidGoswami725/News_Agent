@@ -5,25 +5,16 @@ import time
 from datetime import datetime
 from elasticsearch import Elasticsearch
 from contentssummariser import summarize_text
-import os
+
 CHECK_INTERVAL = 60
-# ES_ENDPOINT = "https://9fb474a7f57d4bfbbd9e05246ff0b8ec.asia-south1.gcp.elastic-cloud.com:443"
-# ES_USERNAME = "elastic"
-# ES_PASSWORD = "6lWF4jG8mE5IUnOSc66kmSo1"
-# ES_INDEX = "news-articles"
-
-
-ES_ENDPOINT = os.getenv("ELASTICSEARCH_ENDPOINT")
-ES_USERNAME = os.getenv("ELASTICSEARCH_USERNAME")
-ES_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
+ES_ENDPOINT = "https://9fb474a7f57d4bfbbd9e05246ff0b8ec.asia-south1.gcp.elastic-cloud.com:443"
+ES_USERNAME = "elastic"
+ES_PASSWORD = "6lWF4jG8mE5IUnOSc66kmSo1"
+ES_INDEX = "news-articles"
 MAX_TOKEN_LIMIT = 1024  # Max tokens for facebook/bart-large-cnn
 
 def connect_to_elasticsearch():
-    es = Elasticsearch(
-    hosts=[ES_ENDPOINT],
-    basic_auth=(ES_USERNAME, ES_PASSWORD),
-    # verify_certs=False  # Disable SSL verification
-)
+    es = Elasticsearch(ES_ENDPOINT, basic_auth=(ES_USERNAME, ES_PASSWORD))
     return es
 
 def scrape_article_content(url):
@@ -85,7 +76,7 @@ def scrape_rss_feed(rss_url, category, es):
         
         # Generate summary at scrape time
         summary = summarize_text(content)
-        if not summary or summary in ["No content available for summarization.", "Summarization failed due to an error."]:
+        if not summary or summary in ["No content available for summarization.", "Summarization failed due to an unexpected error.", "Summarization failed due to a persistent error.", "Empty summary generated from API"]:
             print(f"Skipping {entry.get('title', 'No Title')} - failed to generate valid summary")
             continue
         
@@ -130,9 +121,63 @@ def upload_to_elasticsearch(es, articles, index_name=ES_INDEX):
             print(f"Uploaded new article: {response['result']} (ID: {link})")
             new_articles_uploaded += 1
         else:
+            if(article['summary'] in ["No content available for summarization.", "Summarization failed due to an unexpected error.", "Summarization failed due to a persistent error.", "Empty summary generated from API"]):
+                es.delete(index=index_name, id=link)
             print(f"Article already exists (ID: {link}), skipping upload")
     return new_articles_uploaded
 
+        
+def check_bad_summary(es, index_name=ES_INDEX):
+    # Define the list of bad summaries
+    bad_summaries = [
+        "No content available for summarization.",
+        "Summarization failed due to an unexpected error.",
+        "Summarization failed due to a persistent error.",
+        "Empty summary generated from API"
+    ]
+
+    # Pagination parameters
+    page_size = 100  # Number of documents to retrieve per page
+    from_idx = 0  # Starting index for pagination
+
+    while True:
+        # Fetch a batch of documents
+        response = es.search(
+            index=index_name,
+            body={
+                "query": {
+                    "match_all": {}  # Match all documents in the index
+                },
+                "from": from_idx,
+                "size": page_size
+            }
+        )
+
+        # Check if there are no more documents
+        if not response['hits']['hits']:
+            print("Finished checking all articles for bad summaries.")
+            break
+
+        # Process each document in the current batch
+        for hit in response['hits']['hits']:
+            doc_id = hit['_id']
+            summary = hit['_source'].get('summary', '')
+
+            # Check if the summary is in the list of bad summaries
+            if summary in bad_summaries:
+                print(f"Bad summary detected for article (ID: {doc_id}), deleting...")
+                try:
+                    es.delete(index=index_name, id=doc_id)
+                    print(f"Deleted article with bad summary (ID: {doc_id})")
+                except Elasticsearch.NotFoundError:
+                    print(f"Article with bad summary not found (ID: {doc_id})")
+                except Exception as e:
+                    print(f"An error occurred while deleting article (ID: {doc_id}): {e}")
+
+        # Move to the next batch
+        from_idx += page_size
+        
+        
 def main():
     rss_feeds = {
         "Top": "https://feeds.feedburner.com/ndtvnews-top-stories",
@@ -140,7 +185,7 @@ def main():
         "World": "https://feeds.feedburner.com/ndtvnews-world-news",
         "States": "https://feeds.feedburner.com/ndtvnews-south",
         "Cities": "https://feeds.feedburner.com/ndtvnews-cities-news",
-        "Entertainment": "https://example.com/entertainment-rss"
+        "Entertainment": "https://feeds.feedburner.com/ndtvmovies-latest"
     }
     es = connect_to_elasticsearch()
     if not es.ping():
@@ -149,6 +194,7 @@ def main():
     
     new_articles = []
     for category, url in rss_feeds.items():
+        check_bad_summary(es)
         print(f"Scraping {category} feed...")
         articles = scrape_rss_feed(url, category, es)
         new_articles.extend(articles)
@@ -165,3 +211,5 @@ if __name__ == "__main__":
         main()
         print(f"Waiting for {CHECK_INTERVAL // 60} minute(s)...")
         time.sleep(CHECK_INTERVAL)
+
+    
